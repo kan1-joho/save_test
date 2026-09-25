@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>STEP20-1 動画保存 技術検証</title>
+<style>
+  :root {
+    --bg: #15140f; --panel: #1e1c15; --line: #34302380;
+    --text: #ece6d6; --dim: #a49d87; --accent: #b2402c;
+    --ok: #5c8a5c; --warn: #c9a13b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Hiragino Sans", sans-serif;
+    padding: 16px max(16px, env(safe-area-inset-right)) max(16px, env(safe-area-inset-bottom));
+  }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  h2 { font-size: 13px; color: var(--dim); margin: 20px 0 8px; letter-spacing: 0.03em; }
+  p.note { font-size: 11px; color: var(--dim); line-height: 1.7; margin: 4px 0 0; }
+  #canvasWrap { background: #000; border-radius: 8px; overflow: hidden; }
+  canvas, video { width: 100%; display: block; background: #000; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  button {
+    font: inherit; border: 1px solid var(--line); background: #262319; color: var(--text);
+    border-radius: 8px; padding: 10px 14px; font-size: 13px;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 700; }
+  button.selected { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: 0.4; }
+  #log {
+    font-family: ui-monospace, Menlo, monospace; font-size: 11px; white-space: pre-wrap;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+    padding: 10px; max-height: 180px; overflow-y: auto; margin-top: 8px;
+  }
+  #checklist { list-style: none; padding: 0; margin: 8px 0 0; font-size: 13px; }
+  #checklist li { padding: 6px 0; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; }
+  #checklist li:last-child { border-bottom: none; }
+  .badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); }
+  .badge.auto-ok { color: #fff; background: var(--ok); border-color: var(--ok); }
+  .badge.pending { color: var(--dim); }
+  input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
+  #diag { font-size: 11px; color: var(--dim); line-height: 1.8; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin-top: 8px; }
+  #diag b { color: var(--text); }
+</style>
+</head>
+<body>
+
+<h1>STEP20-1 動画保存 技術検証</h1>
+<p class="note">
+  本体(index.html)・4エンジンファイル(bufferEngine/playbackEngine/storageEngine/coordinateEngine)には
+  一切依存しない、完全に独立した検証用ページです。ここでの結果は本体へ自動反映されません。<br>
+  検証内容：Canvas映像 → canvas.captureStream() → MediaRecorder(MP4優先) → Blob → &lt;video&gt;再生 →
+  共有シート → 写真アプリへの保存、の一連の流れがiPad Safariで成立するかを確認します。
+</p>
+
+<h2>1. 検証用映像(Canvas)</h2>
+<div id="canvasWrap"><canvas id="srcCanvas" width="640" height="360"></canvas></div>
+<p class="note">
+  本体のカメラ映像には依存せず、動く円＋経過時間を描画するだけのダミー映像です。
+  「CanvasにdrawImageし続けたものを録画できるか」という、本体組み込み時と同じ構図だけを検証します。
+</p>
+
+<h2>2. 録画設定・実行</h2>
+<div class="row" id="durationRow">
+  <button class="dur-btn selected" data-sec="5">5秒</button>
+  <button class="dur-btn" data-sec="8">8秒</button>
+  <button class="dur-btn" data-sec="10">10秒</button>
+</div>
+<div class="row">
+  <button id="startBtn" class="primary">録画開始</button>
+  <button id="stopBtn" disabled>手動で停止</button>
+</div>
+<p class="note" id="recStatus">未録画</p>
+
+<h2>3. 生成結果</h2>
+<div id="canvasWrap" style="margin-top:6px"><video id="previewVideo" controls playsinline></video></div>
+<div class="row">
+  <a id="downloadLink" style="display:none" download>
+    <button type="button">ファイルとしてダウンロード</button>
+  </a>
+  <button id="shareBtn" style="display:none">共有シートを開く(写真アプリへ保存)</button>
+</div>
+<p class="note" id="blobInfo"></p>
+
+<h2>4. 実機確認チェックリスト</h2>
+<ul id="checklist">
+  <li data-step="1"><span class="badge pending" id="badge1">未確認</span>1. Canvas映像が録画できる(録画開始→エラーが出ない)</li>
+  <li data-step="2"><span class="badge pending" id="badge2">未確認</span>2. MediaRecorderが正常に開始する(state:recordingになる)</li>
+  <li data-step="3"><span class="badge pending" id="badge3">未確認</span>3. 指定秒数後に自動停止できる</li>
+  <li data-step="4"><span class="badge pending" id="badge4">未確認</span>4. MP4(またはフォールバック形式)のBlobが生成される</li>
+  <li data-step="5"><span class="badge pending" id="badge5">未確認</span>5. Blobを&lt;video&gt;で再生できる</li>
+  <li data-step="6"><label><input type="checkbox" id="manual6"> 6. iPad共有シートを開けた(手動確認)</label></li>
+  <li data-step="7"><label><input type="checkbox" id="manual7"> 7. 写真アプリへ保存できた(手動確認)</label></li>
+  <li data-step="8"><label><input type="checkbox" id="manual8"> 8. 保存した動画を写真アプリから再生できた(手動確認)</label></li>
+</ul>
+<p class="note">1〜5は自動判定(このページのJSが検知できる範囲)。6〜8はiPad実機での手動チェックが必要です。</p>
+
+<h2>5. 環境診断</h2>
+<div id="diag"></div>
+
+<h2>6. ログ</h2>
+<div id="log"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  // ---- DOM ----
+  const canvas = document.getElementById("srcCanvas");
+  const ctx = canvas.getContext("2d");
+  const startBtn = document.getElementById("startBtn");
+  const stopBtn = document.getElementById("stopBtn");
+  const durationRow = document.getElementById("durationRow");
+  const recStatus = document.getElementById("recStatus");
+  const previewVideo = document.getElementById("previewVideo");
+  const downloadLink = document.getElementById("downloadLink");
+  const shareBtn = document.getElementById("shareBtn");
+  const blobInfo = document.getElementById("blobInfo");
+  const logEl = document.getElementById("log");
+  const diagEl = document.getElementById("diag");
+
+  function log(msg) {
+    const t = new Date().toLocaleTimeString();
+    logEl.textContent += "[" + t + "] " + msg + "\n";
+    logEl.scrollTop = logEl.scrollHeight;
+    console.log("[STEP20-1]", msg);
+  }
+
+  function setBadgeOk(step) {
+    const el = document.getElementById("badge" + step);
+    if (!el) return;
+    el.textContent = "OK";
+    el.classList.remove("pending");
+    el.classList.add("auto-ok");
+  }
+
+  // ---- 1. ダミー映像(Canvas)を常時描画 ----
+  // 本体では保存済みJPEGフレームをdrawImage()するが、ここでは録画パイプライン自体の
+  // 検証が目的のため、動く円＋経過時間だけを描く。
+  let animStart = null;
+  function drawFrame(now) {
+    if (animStart === null) animStart = now;
+    const elapsedSec = (now - animStart) / 1000;
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const cx = canvas.width / 2 + Math.cos(elapsedSec) * 180;
+    const cy = canvas.height / 2 + Math.sin(elapsedSec * 1.3) * 100;
+    ctx.fillStyle = "#e0533c";
+    ctx.beginPath();
+    ctx.arc(cx, cy, 28, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#ece6d6";
+    ctx.font = "20px sans-serif";
+    ctx.fillText(elapsedSec.toFixed(1) + " s", 16, 32);
+    requestAnimationFrame(drawFrame);
+  }
+  requestAnimationFrame(drawFrame);
+
+  // ---- 録画秒数の選択 ----
+  let recordSec = 5;
+  durationRow.querySelectorAll(".dur-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      recordSec = Number(b.dataset.sec);
+      durationRow.querySelectorAll(".dur-btn").forEach((x) => x.classList.toggle("selected", x === b));
+    });
+  });
+
+  // ---- MediaRecorderが使えるmimeTypeを優先順位付きで探す ----
+  // MP4を最優先で試し、対応していなければWebMへ自動フォールバックする
+  // (「MP4変換ライブラリを導入しない」という制約のもと、ブラウザネイティブの対応範囲だけを見る)。
+  const MIME_CANDIDATES = [
+    'video/mp4;codecs="avc1.42E01E,mp4a.40.2"',
+    "video/mp4;codecs=h264",
+    "video/mp4",
+    "video/webm;codecs=vp9",
+    "video/webm;codecs=vp8",
+    "video/webm",
+  ];
+  function pickMimeType() {
+    if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return "";
+    for (const c of MIME_CANDIDATES) {
+      if (MediaRecorder.isTypeSupported(c)) return c;
+    }
+    return "";
+  }
+
+  // ---- 録画本体 ----
+  let mediaRecorder = null;
+  let recordedChunks = [];
+  let autoStopTimer = null;
+
+  function resetChecklistAuto() {
+    [1, 2, 3, 4, 5].forEach((n) => {
+      const el = document.getElementById("badge" + n);
+      el.textContent = "未確認";
+      el.classList.remove("auto-ok");
+      el.classList.add("pending");
+    });
+  }
+
+  function startRecording() {
+    if (!window.MediaRecorder) {
+      log("⚠ このブラウザはMediaRecorderに対応していません。");
+      return;
+    }
+    resetChecklistAuto();
+    recordedChunks = [];
+    previewVideo.removeAttribute("src");
+    downloadLink.style.display = "none";
+    shareBtn.style.display = "none";
+    blobInfo.textContent = "";
+
+    let stream;
+    try {
+      stream = canvas.captureStream(24); // 本体のCAPTURE_INTERVAL_MSと同じ24fps相当
+    } catch (e) {
+      log("⚠ canvas.captureStream()に失敗: " + e.message);
+      return;
+    }
+    setBadgeOk(1);
+
+    const mimeType = pickMimeType();
+    log("選択されたmimeType: " + (mimeType || "(ブラウザ既定に委任)"));
+
+    try {
+      mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    } catch (e) {
+      log("⚠ MediaRecorderの生成に失敗: " + e.message);
+      return;
+    }
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+    };
+    mediaRecorder.onerror = (e) => {
+      log("⚠ MediaRecorderエラー: " + (e.error ? e.error.message : e));
+    };
+    mediaRecorder.onstart = () => {
+      log("録画開始。state=" + mediaRecorder.state);
+      setBadgeOk(2);
+      recStatus.textContent = "録画中… (" + recordSec + "秒後に自動停止)";
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+    };
+    mediaRecorder.onstop = () => {
+      log("録画停止。チャンク数=" + recordedChunks.length);
+      setBadgeOk(3);
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      recStatus.textContent = "停止しました。Blobを生成します…";
+      if (autoStopTimer) {
+        clearTimeout(autoStopTimer);
+        autoStopTimer = null;
+      }
+      finalizeRecording();
+    };
+
+    mediaRecorder.start();
+    autoStopTimer = setTimeout(() => {
+      if (mediaRecorder && mediaRecorder.state === "recording") {
+        mediaRecorder.stop();
+      }
+    }, recordSec * 1000);
+  }
+
+  function stopRecordingManually() {
+    if (mediaRecorder && mediaRecorder.state === "recording") {
+      mediaRecorder.stop();
+    }
+  }
+
+  function finalizeRecording() {
+    if (!recordedChunks.length) {
+      log("⚠ 録画データが空です(チャンクが1件も来ませんでした)。");
+      recStatus.textContent = "失敗：録画データが空でした。";
+      return;
+    }
+    const actualType = (mediaRecorder && mediaRecorder.mimeType) || recordedChunks[0].type || "video/webm";
+    const blob = new Blob(recordedChunks, { type: actualType });
+    setBadgeOk(4);
+    log("Blob生成完了。type=" + blob.type + " / size=" + blob.size + " bytes");
+    blobInfo.textContent =
+      "形式: " + blob.type + " / サイズ: " + (blob.size / 1024).toFixed(1) + " KB";
+    recStatus.textContent = "録画完了(" + recordSec + "秒)。下でプレビューできます。";
+
+    const url = URL.createObjectURL(blob);
+    previewVideo.src = url;
+    previewVideo.onloadedmetadata = () => {
+      log("<video>でのメタデータ読み込み成功(再生可能)。duration=" + previewVideo.duration.toFixed(2) + "s");
+      setBadgeOk(5);
+    };
+    previewVideo.onerror = () => {
+      log("⚠ <video>での再生に失敗しました。");
+    };
+
+    const ext = blob.type.indexOf("mp4") !== -1 ? "mp4" : "webm";
+    const filename = "step20_verify_" + Date.now() + "." + ext;
+    downloadLink.href = url;
+    downloadLink.download = filename;
+    downloadLink.style.display = "inline-block";
+
+    setupShare(blob, filename);
+  }
+
+  // ---- 共有シート(Web Share API Level 2: files) ----
+  function setupShare(blob, filename) {
+    shareBtn.style.display = "none";
+    if (!navigator.share) {
+      log("このブラウザはnavigator.share自体に対応していません。ダウンロードボタンから保存してください。");
+      return;
+    }
+    let file;
+    try {
+      file = new File([blob], filename, { type: blob.type });
+    } catch (e) {
+      log("⚠ File生成に失敗: " + e.message);
+      return;
+    }
+    if (navigator.canShare && !navigator.canShare({ files: [file] })) {
+      log("navigator.canShare()がfiles共有不可と判定しました。ダウンロードボタンから保存してください。");
+      return;
+    }
+    shareBtn.style.display = "inline-block";
+    shareBtn.onclick = async () => {
+      try {
+        await navigator.share({ files: [file], title: "STEP20-1検証動画" });
+        log("共有シートでの操作が完了しました(キャンセルも含む)。写真アプリへの保存は手動チェック欄で確認してください。");
+      } catch (e) {
+        log("共有がキャンセル、または失敗しました: " + e.message);
+      }
+    };
+  }
+
+  startBtn.addEventListener("click", startRecording);
+  stopBtn.addEventListener("click", stopRecordingManually);
+
+  // ---- 環境診断 ----
+  function buildDiag() {
+    const lines = [];
+    lines.push("<b>UA</b>: " + navigator.userAgent);
+    lines.push("<b>secureContext</b>: " + window.isSecureContext);
+    lines.push("<b>MediaRecorder対応</b>: " + !!window.MediaRecorder);
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported) {
+      MIME_CANDIDATES.forEach((c) => {
+        lines.push("&nbsp;&nbsp;isTypeSupported(" + c + "): " + MediaRecorder.isTypeSupported(c));
+      });
+    }
+    lines.push("<b>HTMLCanvasElement.captureStream対応</b>: " + (typeof canvas.captureStream === "function"));
+    lines.push("<b>navigator.share対応</b>: " + !!navigator.share);
+    lines.push("<b>navigator.canShare対応</b>: " + !!navigator.canShare);
+    diagEl.innerHTML = lines.join("<br>");
+  }
+  buildDiag();
+  log("検証ページを初期化しました。「録画開始」を押してください。");
+})();
+</script>
+</body>
+</html>
